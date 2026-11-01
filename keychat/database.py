@@ -117,6 +117,12 @@ class Database:
         ).fetchone()
         return dict(row) if row else None
 
+    def get_user_by_id(self, user_id):
+        row = self.conn.execute(
+            "SELECT * FROM users WHERE id = ?", (user_id,)
+        ).fetchone()
+        return dict(row) if row else None
+
     def public_user(self, user):
         """Пользователь без секретных полей (пароль) — для UI и сессии."""
         return {

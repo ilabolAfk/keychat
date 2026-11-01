@@ -68,6 +68,10 @@ class VoiceRecorder(QObject):
             w.writeframes(pcm)
         return buf.getvalue()
 
+    def read_pcm_since(self, offset: int) -> bytes:
+        """Возвращает накопленный PCM с позиции offset (для живого звонка)."""
+        return bytes(self._buffer[offset:])
+
 
 class VoicePlayer(QObject):
     """Воспроизведение WAV-голосового сообщения."""
@@ -112,3 +116,46 @@ def wav_duration_ms(wav_bytes: bytes) -> int:
             return int(frames * 1000 / rate) if rate else 0
     except Exception:
         return 0
+
+
+class CallAudioPlayer(QObject):
+    """Непрерывное воспроизведение входящего PCM-потока во время звонка.
+
+    Буферизует сырые PCM-чанки (16 кГц, моно, 16 бит) и подаёт их на QAudioSink.
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._buffer = bytearray()
+        self._sink = None
+        self._io = None
+
+    def _ensure_sink(self):
+        if self._sink is not None:
+            return
+        fmt = _make_format()
+        self._sink = QAudioSink(fmt, self)
+        self._io = None
+
+    def write(self, pcm: bytes):
+        if not pcm:
+            return
+        self._ensure_sink()
+        self._buffer.extend(pcm)
+        self._pending_size = len(self._buffer)
+        if self._io is None:
+            # каждый чанк подаём отдельным буфером, чтобы не накапливать
+            chunk = bytes(self._buffer)
+            self._buffer.clear()
+            buf = QBuffer(self)
+            buf.setData(chunk)
+            buf.open(QIODevice.OpenModeFlag.ReadOnly)
+            self._io = buf
+            self._sink.start(buf)
+
+    def stop(self):
+        if self._sink is not None:
+            self._sink.stop()
+        self._buffer.clear()
+        self._sink = None
+        self._io = None

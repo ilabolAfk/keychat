@@ -1,7 +1,8 @@
 import os
 import shutil
+import base64
 
-from PySide6.QtCore import Qt, QSize, Signal
+from PySide6.QtCore import Qt, QSize, Signal, QTimer
 from PySide6.QtGui import QFont, QColor, QIcon, QPixmap, QCursor
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QListWidget, QListWidgetItem,
@@ -17,6 +18,7 @@ from .stickers import StickerPicker, find_stickers
 from .calls import CallDialog
 from .voice import VoiceRecorder, VoicePlayer, wav_duration_ms
 from .notify import NotificationPlayer
+from .network import NetClient, RELAY_URL
 
 import qtawesome as qta
 
@@ -263,6 +265,16 @@ class MainWindow(QWidget):
         self.active_chat = None
         self.history = []
         self.notifier = NotificationPlayer(self)
+
+        self.net = NetClient(self.user["id"], self)
+        self.net.connected.connect(self._on_net_connected)
+        self.net.message_received.connect(self._on_net_message)
+        self.net.online_changed.connect(self._on_online)
+        self.net.call_received.connect(self._on_call_received)
+        self.net.call_answer_received.connect(self._on_call_answer_received)
+        self.net.audio_received.connect(self._on_net_audio)
+        self.net.connect_to_relay()
+
         self.setWindowTitle("KeyChat")
         self.setMinimumSize(820, 560)
         self.resize(1024, 680)
@@ -590,6 +602,82 @@ class MainWindow(QWidget):
         self.history_container.insertWidget(self.history_container.count() - 1, bubble)
         self._scroll_to_bottom()
         self._load_chats()
+        # доставка по каналу (шифруется при записи в БД на стороне получателя)
+        self._net_send_payload({"type": "text", "text": text})
+
+    def _net_send_payload(self, payload):
+        """Отправляет payload собеседнику из активного чата по каналу."""
+        if self.active_chat is None:
+            return
+        peer_id = self.active_chat.get("peer_id") or self.active_chat.get("id")
+        self.net.send_chat(peer_id, payload)
+
+    def _on_net_connected(self):
+        return
+
+    def _on_online(self, ids):
+        """Фиксируем список онлайн id для подсказки при вызове офлайн-собеседника."""
+        self._online_ids = [str(i) for i in ids]
+
+    def _on_net_message(self, payload, from_user):
+        """Входящее сообщение/стикер/файл от собеседника."""
+        # from_user — числовой id отправителя (его шлёт relay в поле from)
+        try:
+            peer_id = int(from_user)
+        except (TypeError, ValueError):
+            return
+        peer = self.db.get_user_by_id(peer_id)
+        if peer is None:
+            return
+        chat = self.active_chat
+        if chat is None or chat.get("peer_id") != peer["id"]:
+            chat_rec = {
+                "id": self.db.get_or_create_chat(peer["id"]),
+                "peer_id": peer["id"],
+                "username": peer["username"],
+                "avatar_color": peer["avatar_color"],
+                "avatar_path": peer.get("avatar_path") or "",
+                "last_message": None,
+                "last_seen": None,
+            }
+            self._load_chats()
+            self._select_chat(chat_rec)
+            chat = chat_rec
+        mtype = payload.get("type")
+        if mtype == "text":
+            text = payload.get("text", "")
+            if not text:
+                return
+            msg = self.db.send_message(chat["id"], peer["id"], text)
+            msg["sender_name"] = self.user["username"]
+            self._append_bubble(msg, chat, mine=False)
+        elif mtype == "sticker":
+            path = payload.get("path", "")
+            msg = self.db.send_message(chat["id"], peer["id"], "", msg_type="sticker", meta=path)
+            self._append_bubble(msg, chat, mine=False)
+        elif mtype == "file":
+            name = payload.get("name", "файл")
+            data = payload.get("data", "").encode("latin-1")
+            # сохраняем зашифрованным
+            stored_name = random_stored_name()
+            dest = os.path.join(files_dir_for(self.db.path), stored_name)
+            with open(dest, "wb") as f:
+                f.write(data)
+            msg = self.db.send_message(
+                chat["id"], peer["id"], "",
+                msg_type="file", meta=stored_name + "|name=" + name,
+            )
+            self._append_bubble(msg, chat, mine=False)
+        self._load_chats()
+
+    def _append_bubble(self, msg, chat, mine):
+        msg["sender_name"] = chat["username"] if not mine else self.user["username"]
+        bubble = MessageBubble(msg, mine, self.user["avatar_color"] if mine else chat["avatar_color"])
+        bubble.file_download_requested.connect(self._download_file)
+        bubble.voice_play_requested.connect(self._play_voice)
+        bubble.delete_requested.connect(self._delete_message)
+        self.history_container.insertWidget(self.history_container.count() - 1, bubble)
+        self._scroll_to_bottom()
 
     def _toggle_stickers(self):
         if self.active_chat is None:
@@ -609,8 +697,7 @@ class MainWindow(QWidget):
         self.history_container.insertWidget(self.history_container.count() - 1, bubble)
         self._scroll_to_bottom()
         self._load_chats()
-
-    def _attach_file(self):
+        self._net_send_payload({"type": "sticker", "path": path})
         if self.active_chat is None:
             return
         src, _ = QFileDialog.getOpenFileName(self, "Выберите файл")
@@ -628,6 +715,15 @@ class MainWindow(QWidget):
         self.history_container.insertWidget(self.history_container.count() - 1, bubble)
         self._scroll_to_bottom()
         self._load_chats()
+        # передаём файл получателю по каналу
+        try:
+            with open(os.path.join(files_dir_for(self.db.path), rel_path), "rb") as f:
+                enc = f.read()
+        except OSError:
+            enc = b""
+        self._net_send_payload(
+            {"type": "file", "name": name, "data": enc.decode("latin-1")}
+        )
 
     def _store_file(self, src):
         """Переносит файл в папку хранилища в зашифрованном виде."""
@@ -676,8 +772,128 @@ class MainWindow(QWidget):
     def _call_peer(self):
         if self.active_chat is None:
             return
-        dlg = CallDialog(self.active_chat["username"], is_outgoing=True, parent=self)
+        peer_id = self.active_chat.get("peer_id")
+        self._current_call_is_outgoing = True
+
+        def _do_call():
+            self.net.send_call(peer_id, {"kind": "offer"})
+            self._open_call_window(is_outgoing=True)
+
+        # если собеседник не в сети, канал доставит «в никуда» — предупредим
+        online = getattr(self, "_online_ids", None)
+        if online is not None and str(peer_id) not in [str(i) for i in online]:
+            ret = QMessageBox.question(
+                self, "KeyChat",
+                "Собеседник сейчас не в сети. Позвонить?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            )
+            if ret != QMessageBox.StandardButton.Yes:
+                return
+        _do_call()
+
+    def _open_call_window(self, is_outgoing, peer_name=None, peer_id=None):
+        if peer_name is None:
+            peer_name = self.active_chat["username"] if self.active_chat else "…"
+        dlg = CallDialog(peer_name, is_outgoing=is_outgoing, parent=self)
+        if not is_outgoing:
+            dlg.accepted_call.connect(lambda: self.net.send_call_answer(peer_id, {"kind": "accept"}))
+            dlg.accepted_call.connect(lambda: self._start_call_audio())
+            dlg.rejected_call.connect(lambda: self.net.send_call_answer(peer_id, {"kind": "reject"}))
+        else:
+            dlg.accepted_call.connect(lambda: None)  # исходящий: аудио стартует по "accept" собеседника
+        dlg.hangup_clicked.connect(self._on_call_end_signal)
+        self._current_call = dlg
+        self._current_call_is_outgoing = is_outgoing
         dlg.exec()
+
+    def _on_call_received(self, payload, from_user):
+        """Входящий вызов от собеседника."""
+        try:
+            peer_id = int(from_user)
+        except (TypeError, ValueError):
+            return
+        peer = self.db.get_user_by_id(peer_id)
+        name = peer["username"] if peer else str(peer_id)
+        self._current_call_is_outgoing = False
+        self._open_call_window(is_outgoing=False, peer_name=name, peer_id=peer_id)
+
+    def _on_call_answer_received(self, payload, from_user):
+        """Собеседник принял/отклонил исходящий вызов."""
+        dlg = getattr(self, "_current_call", None)
+        kind = (payload or {}).get("kind")
+        if kind == "accept":
+            # собеседник поднял трубку — включаем звук с нашей стороны
+            self._start_call_audio()
+        elif kind == "end":
+            if dlg is not None:
+                dlg.complete_remote_hangup()
+            self._stop_call_audio()
+        elif kind == "reject":
+            if dlg is not None:
+                dlg.complete_remote_hangup()
+
+    def _on_net_audio(self, chunk_b64, from_user):
+        """Входящий голос собеседника во время звонка."""
+        if not getattr(self, "_call_active", False):
+            return
+        try:
+            pcm = base64.b64decode(chunk_b64)
+        except Exception:
+            return
+        player = getattr(self, "_call_player", None)
+        if player is None:
+            from .voice import CallAudioPlayer
+            player = CallAudioPlayer(self)
+            self._call_player = player
+        player.write(pcm)
+
+    def _on_call_end_signal(self):
+        dlg = getattr(self, "_current_call", None)
+        if dlg and self._current_call_is_outgoing:
+            self.net.send_call_answer(self.active_chat.get("peer_id"), {"kind": "end"})
+        self._stop_call_audio()
+
+    def _start_call_audio(self):
+        """Начинает звонок: включает захват микрофона и поток отправки PCM."""
+        self._call_active = True
+        dlg = getattr(self, "_current_call", None)
+        if dlg is not None and getattr(dlg, "state", "") != "active":
+            dlg._on_accept()
+        # микрофон -> отправитель PCM каждые ~60 мс
+        try:
+            self._call_mic = VoiceRecorder(self)
+            self._call_mic.start()
+        except RuntimeError as e:
+            QMessageBox.warning(self, "KeyChat", "Нет доступа к микрофону: " + str(e))
+        self._call_audio_offset = 0
+        self._call_audio_timer = QTimer(self)
+        self._call_audio_timer.timeout.connect(self._tick_call_mic)
+        self._call_audio_timer.start(60)
+
+    def _tick_call_mic(self):
+        """Собирает свежие PCM-чанки с микрофона и шлёт собеседнику."""
+        if not self._call_active or self.active_chat is None:
+            return
+        mic = getattr(self, "_call_mic", None)
+        if mic is None or not mic.recording:
+            return
+        data = mic.read_pcm_since(getattr(self, "_call_audio_offset", 0))
+        self._call_audio_offset += len(data)
+        if len(data) >= 640:  # ~20 мс при 16 кГц/16бит/моно
+            peer_id = self.active_chat.get("peer_id")
+            self.net.send_audio(peer_id, base64.b64encode(bytes(data)).decode("ascii"))
+
+    def _stop_call_audio(self):
+        self._call_active = False
+        t = getattr(self, "_call_audio_timer", None)
+        if t is not None:
+            t.stop()
+        mic = getattr(self, "_call_mic", None)
+        if mic is not None:
+            mic.stop()
+        player = getattr(self, "_call_player", None)
+        if player is not None:
+            player.stop()
 
     def _start_voice(self):
         if self.active_chat is None:
