@@ -1,11 +1,13 @@
 import json
+import os
 
 from PySide6.QtCore import QObject, Signal, QUrl
 from PySide6.QtWebSockets import QWebSocket
 
-# Узел-ретранслятор туннеля. Заполняется адресом ngrok/локального relay.
-# Пример: ws://xxxx.ngrok.io  (для http-туннеля ngrok ставим ws://)
-RELAY_URL = "ws://127.0.0.1:8765"
+# Узел-ретранслятор. Адрес берётся из переменной окружения KEYCHAT_RELAY_URL,
+# иначе — локальный relay по умолчанию.
+# Примеры: ws://192.168.1.50:8765 (RPi в локалке), ws://<домен>:8765 (снаружи).
+RELAY_URL = os.environ.get("KEYCHAT_RELAY_URL", "ws://127.0.0.1:8765")
 
 
 class NetClient(QObject):
