@@ -1,0 +1,18 @@
+# Секреты и пользовательские данные
+keychat.db
+*.db
+*.db.key
+keychat_files/
+_sticker_cache/
+
+# Сборка
+build/
+dist/
+*.spec
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
