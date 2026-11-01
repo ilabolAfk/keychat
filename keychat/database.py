@@ -48,6 +48,8 @@ class Database:
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 username TEXT NOT NULL UNIQUE,
                 avatar_color TEXT NOT NULL DEFAULT '#FF7A1A',
+                theme TEXT NOT NULL DEFAULT 'dark',
+                password_hash TEXT,
                 created_at TEXT NOT NULL DEFAULT (datetime('now'))
             );
 
@@ -78,14 +80,17 @@ class Database:
         self.conn.commit()
 
     def _migrate(self):
-        """Добавляет колонки msg_type/meta в старые базы (без их потери)."""
-        cols = {r[1] for r in self.conn.execute("PRAGMA table_info(messages)")}
-        if "msg_type" not in cols:
-            self.conn.execute(
-                "ALTER TABLE messages ADD COLUMN msg_type TEXT NOT NULL DEFAULT 'text'"
-            )
-        if "meta" not in cols:
-            self.conn.execute("ALTER TABLE messages ADD COLUMN meta TEXT")
+        """Добавляет колонки msg_type/meta/password_hash/theme в старые базы."""
+        for tbl, cols_def in (
+            ("messages", [("msg_type", "TEXT NOT NULL DEFAULT 'text'"), ("meta", "TEXT")]),
+            ("users", [("password_hash", "TEXT"), ("theme", "TEXT NOT NULL DEFAULT 'dark'")]),
+        ):
+            cols = {r[1] for r in self.conn.execute(f"PRAGMA table_info({tbl})")}
+            for name, ddl in cols_def:
+                if name not in cols:
+                    self.conn.execute(
+                        f"ALTER TABLE {tbl} ADD COLUMN {name} {ddl}"
+                    )
 
     # ---------- settings ----------
     def get_setting(self, key, default=None):
@@ -109,10 +114,31 @@ class Database:
         ).fetchone()
         return dict(row) if row else None
 
-    def create_user(self, username, avatar_color):
+    def public_user(self, user):
+        """Пользователь без секретных полей (пароль) — для UI и сессии."""
+        return {
+            "id": user["id"],
+            "username": user["username"],
+            "avatar_color": user["avatar_color"],
+            "theme": user.get("theme", "dark"),
+        }
+
+    def verify_login(self, username, password):
+        """Проверяет логин/пароль. Возвращает public-пользователя или None."""
+        user = self.get_user_by_name(username)
+        if not user:
+            return None
+        if not user.get("password_hash"):
+            return None
+        from .security import verify_password
+        if not verify_password(password, user["password_hash"]):
+            return None
+        return self.public_user(user)
+
+    def create_user(self, username, avatar_color, password_hash=None):
         cur = self.conn.execute(
-            "INSERT INTO users(username, avatar_color) VALUES(?, ?)",
-            (username, avatar_color),
+            "INSERT INTO users(username, avatar_color, password_hash) VALUES(?, ?, ?)",
+            (username, avatar_color, password_hash),
         )
         self.conn.commit()
         return cur.lastrowid
@@ -126,6 +152,18 @@ class Database:
     def update_avatar_color(self, user_id, color):
         self.conn.execute(
             "UPDATE users SET avatar_color = ? WHERE id = ?", (color, user_id)
+        )
+        self.conn.commit()
+
+    def set_password(self, user_id, password_hash):
+        self.conn.execute(
+            "UPDATE users SET password_hash = ? WHERE id = ?", (password_hash, user_id)
+        )
+        self.conn.commit()
+
+    def update_theme(self, user_id, theme):
+        self.conn.execute(
+            "UPDATE users SET theme = ? WHERE id = ?", (theme, user_id)
         )
         self.conn.commit()
 

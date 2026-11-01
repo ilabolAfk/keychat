@@ -9,11 +9,12 @@ from PySide6.QtWidgets import (
     QMessageBox, QSizePolicy, QSplitter, QScrollArea, QApplication,
     QFileDialog, QToolButton,
 )
-from .theme import QSS, PALETTE
+from .theme import QSS, PALETTE, apply_theme, current_qss, DEFAULT_ACCENT, is_hex_color
 from .widgets import Avatar
 from .settings_dialog import SettingsDialog
 from .security import files_dir_for, random_stored_name
 from .stickers import StickerPicker, find_stickers
+from .calls import CallDialog
 
 import qtawesome as qta
 
@@ -218,6 +219,7 @@ class MainWindow(QWidget):
         self.setStyleSheet(QSS)
         self._build()
         self._load_chats()
+        self.apply_user_theme()
 
     # ---------- build ----------
     def _build(self):
@@ -315,6 +317,16 @@ class MainWindow(QWidget):
         self.header_peer = QLabel("Выберите чат")
         self.header_peer.setObjectName("HeaderPeer")
         hl.addWidget(self.header_peer, 1)
+        self.call_btn = QPushButton()
+        self.call_btn.setObjectName("IconBtn")
+        self.call_btn.setFixedSize(40, 40)
+        self.call_btn.setIcon(qta.icon("fa5s.phone-alt", color=PALETTE["orange"]))
+        self.call_btn.setIconSize(QSize(18, 18))
+        self.call_btn.setToolTip("Позвонить")
+        self.call_btn.clicked.connect(self._call_peer)
+        # Скрыт до выбора чата
+        self.call_btn.setEnabled(False)
+        hl.addWidget(self.call_btn)
         self.clear_btn = QPushButton("Очистить историю")
         self.clear_btn.setObjectName("Ghost")
         self.clear_btn.clicked.connect(self._clear_history)
@@ -426,6 +438,25 @@ class MainWindow(QWidget):
         self.input_bar.setVisible(False)
 
     # ---------- data flow ----------
+    def apply_user_theme(self, accent=None, theme=None):
+        """Применяет тему пользователя (акцент + режим), крася виджеты на лету."""
+        accent = accent or (self.user.get("avatar_color") if is_hex_color(self.user.get("avatar_color")) else DEFAULT_ACCENT)
+        theme = theme or self.user.get("theme", "dark")
+        apply_theme(accent, theme)
+        self.setStyleSheet(current_qss())
+        self._refresh_icons()
+
+    def _refresh_icons(self):
+        """Обновляет иконки, зависящие от палитры, на лету."""
+        try:
+            self.settings_btn.setIcon(qta.icon("fa5s.cog", color=PALETTE["text_dim"]))
+            self.friend_btn.setIcon(qta.icon("fa5s.plus", color=PALETTE["text_on_orange"]))
+            self.send_btn.setIcon(qta.icon("fa5s.paper-plane", color=PALETTE["text_on_orange"]))
+            self.sticker_btn.setIcon(qta.icon("fa5s.smile", color=PALETTE["orange"]))
+            self.clear_btn.setText("Очистить историю")
+        except AttributeError:
+            pass
+
     def _load_chats(self):
         chats = self.db.list_chats()
         self.chat_list.set_chats(chats, self.active_chat)
@@ -440,6 +471,7 @@ class MainWindow(QWidget):
         self.history_area.setVisible(True)
         self.input_bar.setVisible(True)
         self.clear_btn.setEnabled(True)
+        self.call_btn.setEnabled(True)
         self._reload_history()
 
     def _reload_history(self):
@@ -547,6 +579,12 @@ class MainWindow(QWidget):
             f.write(plain)
         QMessageBox.information(self, "KeyChat", "Файл сохранён: " + dest)
 
+    def _call_peer(self):
+        if self.active_chat is None:
+            return
+        dlg = CallDialog(self.active_chat["username"], is_outgoing=True, parent=self)
+        dlg.exec()
+
     def _clear_history(self):
         if self.active_chat is None:
             return
@@ -565,7 +603,7 @@ class MainWindow(QWidget):
         dlg = QDialog(self)
         dlg.setWindowTitle("Новый чат")
         dlg.setFixedSize(380, 200)
-        dlg.setStyleSheet(QSS)
+        dlg.setStyleSheet(current_qss())
         lay = QVBoxLayout(dlg)
         lay.setContentsMargins(24, 24, 24, 24)
         lay.setSpacing(12)
@@ -615,15 +653,21 @@ class MainWindow(QWidget):
         dlg.exec()
 
     def _open_settings(self):
-        dlg = SettingsDialog(self.db, self.user)
+        dlg = SettingsDialog(self.db, self.user, theme_apply=self._live_theme)
         if dlg.exec() == QDialog.DialogCode.Accepted:
             self.user = dlg.result_user()
             self.name_label.setText(self.user["username"])
             self.profile_avatar.set_name(self.user["username"])
             self.profile_avatar.set_color(self.user["avatar_color"])
+            self.apply_user_theme()
             self._load_chats()
             if self.active_chat:
                 self._reload_history()
+
+    def _live_theme(self, accent, theme):
+        """Предпросмотр темы без сохранения в профиль."""
+        apply_theme(accent if is_hex_color(accent) else DEFAULT_ACCENT, theme)
+        self.setStyleSheet(current_qss())
 
     def _scroll_to_bottom(self):
         scrollbar = self.history_area.verticalScrollBar()

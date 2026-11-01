@@ -1,7 +1,42 @@
 import os
 import secrets
+import hashlib
+import hmac
 
 from cryptography.fernet import Fernet, InvalidToken
+
+# Количество итераций для scrypt-хеша пароля (в меру — быстрый вход, без задержки).
+SCRYPT_N = 2 ** 14
+SCRYPT_R = 8
+SCRYPT_P = 1
+SCRYPT_MAXMEM = 256 * 1024 * 1024  # открыто для OpenSSL
+
+
+def hash_password(password: str) -> str:
+    """Возвращает формат 'scrypt$<salt_hex>$<hash_hex>' — соль вшита в хеш."""
+    salt = secrets.token_hex(16)
+    key = hashlib.scrypt(
+        password.encode("utf-8"), salt=bytes.fromhex(salt),
+        n=SCRYPT_N, r=SCRYPT_R, p=SCRYPT_P, dklen=32, maxmem=SCRYPT_MAXMEM,
+    )
+    return f"scrypt${salt}${key.hex()}"
+
+
+def verify_password(password: str, stored: str) -> bool:
+    """Проверяет пароль против хеша, возвращает False для некорректного формата."""
+    if not stored or not stored.startswith("scrypt$"):
+        return False
+    try:
+        _, salt_hex, hash_hex = stored.split("$")
+        salt = bytes.fromhex(salt_hex)
+        expected = bytes.fromhex(hash_hex)
+    except ValueError:
+        return False
+    actual = hashlib.scrypt(
+        password.encode("utf-8"), salt=salt,
+        n=SCRYPT_N, r=SCRYPT_R, p=SCRYPT_P, dklen=32, maxmem=SCRYPT_MAXMEM,
+    )
+    return hmac.compare_digest(actual, expected)
 
 # Ключ и файлы хранятся рядом с базой, путь выводится из неё, а не хардкодится.
 KEY_EXTENSION = ".key"

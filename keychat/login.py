@@ -1,16 +1,17 @@
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton,
-    QFrame,
+    QFrame, QStackedWidget, QTabBar,
 )
-from .theme import QSS, PALETTE, FONT_FAMILY
+from .theme import QSS, PALETTE, build_styles
+from .widgets import Avatar
 
 import qtawesome as qta
 import hashlib
 
 
 def avatar_color_for(name):
-    """Стабильный оранжевый-нейтральный цвет из username."""
+    """Стабильный нейтральный цвет аватара из username."""
     h = int(hashlib.md5(name.encode("utf-8")).hexdigest(), 16)
     r = 210 + (h & 0x2F)
     g = 130 + ((h >> 8) & 0x2F)
@@ -18,23 +19,55 @@ def avatar_color_for(name):
     return "#{:02X}{:02X}{:02X}".format(r % 256, g % 256, b % 256)
 
 
-class LoginWindow(QWidget):
-    """Вход в KeyChat: новый пользователь или возврат под существующим username."""
+class _AuthFrame(QFrame):
+    """Блок с формой: пароль, подтверждение и кнопкой действия."""
 
-    login_success = Signal(dict)  # emits user dict
+    def __init__(self, submit_text, is_register, parent=None):
+        super().__init__(parent)
+        self.is_register = is_register
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(12)
+
+        self.password_edit = self._make_password()
+        self.password_edit.setPlaceholderText("Пароль")
+        lay.addWidget(self.password_edit)
+
+        self.confirm_edit = QLineEdit()
+        self.confirm_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        self.confirm_edit.setPlaceholderText("Повторите пароль")
+        lay.addWidget(self.confirm_edit)
+        self.confirm_edit.setVisible(is_register)
+
+        self.submit_btn = QPushButton(submit_text)
+        self.submit_btn.setObjectName("Accent")
+        self.submit_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        lay.addWidget(self.submit_btn)
+
+    @staticmethod
+    def _make_password():
+        edit = QLineEdit()
+        edit.setEchoMode(QLineEdit.EchoMode.Password)
+        return edit
+
+
+class LoginWindow(QWidget):
+    """Настоящий вход/регистрация по username + пароль."""
+
+    login_success = Signal(dict)
 
     def __init__(self, db):
         super().__init__()
         self.db = db
         self.setWindowTitle("KeyChat · вход")
-        self.setFixedSize(420, 520)
-        self.setStyleSheet(QSS)
-        self._seed_selected = None
+        self.setFixedSize(420, 560)
+        _, login_qss = build_styles()
+        self.setStyleSheet(login_qss)
         self._build()
 
     def _build(self):
         root = QVBoxLayout(self)
-        root.setContentsMargins(36, 30, 36, 30)
+        root.setContentsMargins(36, 26, 36, 28)
         root.setSpacing(14)
 
         icon = QLabel()
@@ -51,40 +84,43 @@ class LoginWindow(QWidget):
         sub.setObjectName("BrandSub")
         sub.setAlignment(Qt.AlignmentFlag.AlignCenter)
         root.addWidget(sub)
-        root.addSpacing(8)
+        root.addSpacing(6)
 
+        # Переключатель Вход / Регистрация
+        self.tabbar = QTabBar()
+        self.tabbar.addTab("Вход")
+        self.tabbar.addTab("Регистрация")
+        self.tabbar.currentChanged.connect(self._switch_tab)
+        root.addWidget(self.tabbar)
+
+        self.stack = QStackedWidget()
+        root.addWidget(self.stack)
+
+        self.login_frame = _AuthFrame("Войти", is_register=False)
+        self.reg_frame = _AuthFrame("Создать аккаунт", is_register=True)
+        self.stack.addWidget(self.login_frame)
+        self.stack.addWidget(self.reg_frame)
+
+        # Username общий для обеих вкладок, держим в верхнем поле
         self.name_edit = QLineEdit()
-        self.name_edit.setPlaceholderText("Введите username")
-        self.name_edit.setText(self.db.get_setting("last_username", ""))
-        self.name_edit.returnPressed.connect(self._on_enter)
-        root.addWidget(self.name_edit)
+        self.name_edit.setPlaceholderText("Username")
+        self.name_edit.returnPressed.connect(self._auth_current)
+        root.insertWidget(4, self.name_edit)
 
-        self.avatar_preview = QFrame()
-        self.avatar_preview.setFixedSize(64, 64)
-        avatar_l = QVBoxLayout(self.avatar_preview)
-        avatar_l.setContentsMargins(0, 0, 0, 0)
-        self.avatar_label = QLabel(self._seed_selected or "?")
-        self.avatar_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.avatar_label.setStyleSheet(
-            "font-size: 26px; font-weight: 700; color: #1A0F00; background: transparent;"
-        )
-        avatar_l.addWidget(self.avatar_label)
-        self.avatar_preview.setStyleSheet(
-            f"border-radius: 32px; background-color: {PALETTE['orange']};"
-        )
+        self.login_frame.submit_btn.clicked.connect(lambda: self._submit_login())
+        self.reg_frame.submit_btn.clicked.connect(lambda: self._submit_register())
+        self.login_frame.password_edit.returnPressed.connect(self._submit_login)
+        self.reg_frame.password_edit.returnPressed.connect(self._submit_register)
+        self.reg_frame.confirm_edit.returnPressed.connect(self._submit_register)
+
+        self.avatar_preview = Avatar("", color=PALETTE["border"], size=64)
         av_row = QHBoxLayout()
         av_row.addStretch(1)
         av_row.addWidget(self.avatar_preview)
         av_row.addStretch(1)
         root.addLayout(av_row)
-        self.name_edit.textChanged.connect(self._update_avatar_preview)
-        self._update_avatar_preview(self.name_edit.text())
 
-        self.enter_btn = QPushButton("Войти в KeyChat")
-        self.enter_btn.setObjectName("Accent")
-        self.enter_btn.clicked.connect(self._on_enter)
-        self.enter_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        root.addWidget(self.enter_btn)
+        self.name_edit.textChanged.connect(self._preview)
 
         self.hint = QLabel("")
         self.hint.setObjectName("BrandSub")
@@ -92,38 +128,61 @@ class LoginWindow(QWidget):
         self.hint.setWordWrap(True)
         root.addWidget(self.hint)
 
-    def _update_avatar_preview(self, name):
+        if self.db.get_setting("last_username"):
+            self.name_edit.setText(self.db.get_setting("last_username"))
+
+    def _switch_tab(self, index):
+        self.stack.setCurrentIndex(index)
+        self.hint.clear()
+
+    def _preview(self, name):
         name = name.strip()
         if not name:
-            self.avatar_label.setText("?")
-            self.avatar_preview.setStyleSheet(
-                f"border-radius: 32px; background-color: {PALETTE['border']};"
-            )
+            self.avatar_preview.set_name("")
+            self.avatar_preview.set_color(PALETTE["border"])
             return
-        self.avatar_label.setText(name[0].upper())
-        color = avatar_color_for(name)
-        # контрастный текст
-        lum = (int(color[1:3], 16) * 299 + int(color[3:5], 16) * 587 + int(color[5:7], 16) * 114) / 1000
-        txt = "#1A0F00" if lum > 150 else "#FFFFFF"
-        self.avatar_label.setStyleSheet(
-            f"font-size: 26px; font-weight: 700; color: {txt}; background: transparent;"
-        )
-        self.avatar_preview.setStyleSheet(
-            f"border-radius: 32px; border: 2px solid {PALETTE['orange_light']}; background-color: {color};"
-        )
+        self.avatar_preview.set_name(name)
+        self.avatar_preview.set_color(avatar_color_for(name))
 
-    def _on_enter(self):
-        name = self.name_edit.text().strip()
-        if not name:
-            self.hint.setText("Введите username, он же — адрес для входа")
-            return
-        user = self.db.get_user_by_name(name)
-        if user is None:
-            color = avatar_color_for(name)
-            uid = self.db.create_user(name, color)
-            user = {"id": uid, "username": name, "avatar_color": color}
-            self.hint.setText(f"Создан новый профиль «{name}»")
+    def _auth_current(self):
+        if self.stack.currentIndex() == 0:
+            self._submit_login()
         else:
-            self.hint.setText(f"С возвращением, {user['username']}")
+            self._submit_register()
+
+    def _submit_login(self):
+        name = self.name_edit.text().strip()
+        pwd = self.login_frame.password_edit.text()
+        if not name or not pwd:
+            self.hint.setText("Введите username и пароль")
+            return
+        user = self.db.verify_login(name, pwd)
+        if user is None:
+            self.hint.setText("Неверный username или пароль")
+            return
         self.db.set_setting("last_username", user["username"])
+        self.login_success.emit(user)
+
+    def _submit_register(self):
+        name = self.name_edit.text().strip()
+        pwd = self.reg_frame.password_edit.text()
+        confirm = self.reg_frame.confirm_edit.text()
+        if not name or not pwd:
+            self.hint.setText("Введите username и придумайте пароль")
+            return
+        if len(pwd) < 6:
+            self.hint.setText("Пароль должен быть не короче 6 символов")
+            return
+        if pwd != confirm:
+            self.hint.setText("Пароли не совпадают")
+            return
+        existing = self.db.get_user_by_name(name)
+        if existing:
+            self.hint.setText("Этот username уже занят — войдите или выберите другой")
+            return
+        from .security import hash_password
+        uid = self.db.create_user(name, avatar_color_for(name), hash_password(pwd))
+        user = self.db.public_user({"id": uid, "username": name, "avatar_color": avatar_color_for(name), "theme": "dark"})
+        self.db.set_setting("last_username", user["username"])
+        self.hint.setText(f"Аккаунт «{name}» создан")
         self.login_success.emit(user)
