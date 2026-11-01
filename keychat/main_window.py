@@ -15,6 +15,7 @@ from .settings_dialog import SettingsDialog
 from .security import files_dir_for, random_stored_name
 from .stickers import StickerPicker, find_stickers
 from .calls import CallDialog
+from .voice import VoiceRecorder, VoicePlayer, wav_duration_ms
 
 import qtawesome as qta
 
@@ -95,6 +96,7 @@ class MessageBubble(QFrame):
     """Выровненный «пузырь» сообщения."""
 
     file_download_requested = Signal(str, str)  # (stored_name, filename)
+    voice_play_requested = Signal(str)  # wav_hex
 
     def __init__(self, msg, mine, avatar_color):
         super().__init__()
@@ -176,6 +178,37 @@ class MessageBubble(QFrame):
             row.addWidget(dl)
             inner.addLayout(row)
             self._downloadable = True
+        elif msg_type == "voice":
+            wav_hex = msg.get("meta") or ""
+            try:
+                dur = wav_duration_ms(bytes.fromhex(wav_hex)) if wav_hex else 0
+            except ValueError:
+                dur = 0
+            row = QHBoxLayout()
+            row.setSpacing(10)
+            play = QToolButton()
+            play.setIcon(qta.icon("fa5s.play", color="#1A0F00" if mine else PALETTE["orange"]))
+            play.setIconSize(QSize(16, 16))
+            play.setFixedSize(32, 32)
+            play.setStyleSheet(
+                "QToolButton { background: rgba(255,255,255,0.25); border: none; border-radius: 16px; }"
+            )
+            play.setCursor(Qt.CursorShape.PointingHandCursor)
+            play.clicked.connect(lambda: self.voice_play_requested.emit(wav_hex))
+            row.addWidget(play)
+            sec = max(1, round(dur / 1000))
+            dur_lbl = QLabel()
+            dur_lbl.setPixmap(qta.icon("fa5s.microphone", color="#1A0F00" if mine else PALETTE["orange"]).pixmap(14, 14))
+            dur_lbl.setStyleSheet("background: transparent;")
+            dur_txt = QLabel(f"{sec // 60}:{sec % 60:02d}")
+            dur_txt.setStyleSheet(
+                f"font-size: 13px; font-weight: 600; background: transparent;"
+                f"color: {'#1A0F00' if mine else PALETTE['text']};"
+            )
+            row.addWidget(dur_lbl)
+            row.addWidget(dur_txt)
+            row.addStretch(1)
+            inner.addLayout(row)
         else:
             text = QLabel(msg.get("text", ""))
             text.setTextInteractionFlags(
@@ -206,6 +239,7 @@ class MessageBubble(QFrame):
 
 class MainWindow(QWidget):
     logout_requested = Signal()
+    theme_changed = Signal(str)  # 'dark' | 'light' — для смены иконки приложения
 
     def __init__(self, db, user):
         super().__init__()
@@ -418,6 +452,19 @@ class MainWindow(QWidget):
         self.sticker_btn.clicked.connect(self._toggle_stickers)
         bar_row.addWidget(self.sticker_btn)
 
+        self.mic_btn = QToolButton()
+        self.mic_btn.setIcon(qta.icon("fa5s.microphone", color=PALETTE["orange"]))
+        self.mic_btn.setIconSize(QSize(22, 22))
+        self.mic_btn.setToolTip("Голосовое сообщение (удерживайте)")
+        self.mic_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.mic_btn.setStyleSheet(
+            "QToolButton { background: transparent; border: none; border-radius: 8px; padding: 8px; }"
+            "QToolButton:hover { background: rgba(255,122,26,0.2); }"
+        )
+        self.mic_btn.pressed.connect(self._start_voice)
+        self.mic_btn.released.connect(self._finish_voice)
+        bar_row.addWidget(self.mic_btn)
+
         self.input_edit = QTextEdit()
         self.input_edit.setPlaceholderText("Сообщение…")
         self.input_edit.setFixedHeight(56)
@@ -445,6 +492,7 @@ class MainWindow(QWidget):
         apply_theme(accent, theme)
         self.setStyleSheet(current_qss())
         self._refresh_icons()
+        self.theme_changed.emit(theme)
 
     def _refresh_icons(self):
         """Обновляет иконки, зависящие от палитры, на лету."""
@@ -490,6 +538,7 @@ class MainWindow(QWidget):
             peer_color = self.active_chat["avatar_color"]
             bubble = MessageBubble(row, mine, my_color if mine else peer_color)
             bubble.file_download_requested.connect(self._download_file)
+            bubble.voice_play_requested.connect(self._play_voice)
             self.history_container.insertWidget(
                 self.history_container.count() - 1, bubble
             )
@@ -584,6 +633,50 @@ class MainWindow(QWidget):
             return
         dlg = CallDialog(self.active_chat["username"], is_outgoing=True, parent=self)
         dlg.exec()
+
+    def _start_voice(self):
+        if self.active_chat is None:
+            return
+        self.mic_btn.setIcon(qta.icon("fa5s.microphone-slash", color=PALETTE["danger"]))
+        try:
+            self._recorder = VoiceRecorder(self)
+            self._recorder.start()
+        except RuntimeError as e:
+            QMessageBox.warning(self, "KeyChat", "Не удалось начать запись: " + str(e))
+            self.mic_btn.setIcon(qta.icon("fa5s.microphone", color=PALETTE["orange"]))
+
+    def _finish_voice(self):
+        self.mic_btn.setIcon(qta.icon("fa5s.microphone", color=PALETTE["orange"]))
+        rec = getattr(self, "_recorder", None)
+        if rec is None or not rec.recording:
+            return
+        try:
+            wav = rec.stop()
+        except Exception:
+            wav = b""
+        if not wav:
+            return
+        msg = self.db.send_message(
+            self.active_chat["id"], self.user["id"], "",
+            msg_type="voice", meta=wav.hex(),
+        )
+        msg["sender_name"] = self.user["username"]
+        bubble = MessageBubble(msg, True, self.active_chat["avatar_color"])
+        bubble.voice_play_requested.connect(self._play_voice)
+        self.history_container.insertWidget(self.history_container.count() - 1, bubble)
+        self._scroll_to_bottom()
+        self._load_chats()
+
+    def _play_voice(self, wav_hex):
+        try:
+            wav = bytes.fromhex(wav_hex)
+        except ValueError:
+            return
+        player = getattr(self, "_voice_player", None)
+        if player is None:
+            player = VoicePlayer(self)
+            self._voice_player = player
+        player.play(wav)
 
     def _clear_history(self):
         if self.active_chat is None:

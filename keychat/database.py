@@ -26,6 +26,8 @@ def _preview_text(text, msg_type, meta):
                     name = part[5:]
                     break
         return "[Файл] " + (name or "вложение")
+    if msg_type == "voice":
+        return "[Голосовое сообщение]"
     return text
 
 

@@ -2,7 +2,8 @@ from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton,
-    QColorDialog, QMessageBox, QFrame, QComboBox,
+    QColorDialog, QMessageBox, QFrame, QComboBox, QFormLayout, QScrollArea,
+    QWidget,
 )
 from .theme import PALETTE, DEFAULT_ACCENT, current_qss
 from .widgets import Avatar, text_color_for_hex
@@ -20,90 +21,96 @@ class SettingsDialog(QDialog):
         self._user = dict(user)
         self.theme_apply = theme_apply  # callable(accent, theme) для смены темы на лету
         self.setWindowTitle("Настройки · KeyChat")
-        self.setFixedSize(460, 540)
+        self.resize(480, 620)
+        self.setMinimumSize(440, 520)
         self.setStyleSheet(current_qss())
         self._build()
 
     def _build(self):
         root = QVBoxLayout(self)
-        root.setContentsMargins(28, 24, 28, 24)
-        root.setSpacing(14)
+        root.setContentsMargins(20, 18, 20, 18)
+        root.setSpacing(10)
 
         title = QLabel("Настройки")
         title.setObjectName("DialogTitle")
         root.addWidget(title)
 
-        self.preview = Avatar(self._user["username"], self._user["avatar_color"], size=84)
-        center = QHBoxLayout()
-        center.addStretch(1)
-        center.addWidget(self.preview)
-        center.addStretch(1)
-        root.addLayout(center)
+        # Прокручиваемая область, чтобы подписи и поля не наползали друг на друга
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
 
-        def _form(label_text, widget):
-            lay = QVBoxLayout()
-            lay.setSpacing(6)
-            lab = QLabel(label_text)
+        body = QWidget()
+        form = QFormLayout(body)
+        form.setContentsMargins(4, 4, 4, 4)
+        form.setSpacing(10)
+        form.setLabelAlignment(Qt.AlignmentFlag.AlignLeft)
+
+        self.preview = Avatar(self._user["username"], self._user["avatar_color"], size=84)
+        preview_row = QHBoxLayout()
+        preview_row.addStretch(1)
+        preview_row.addWidget(self.preview)
+        preview_row.addStretch(1)
+
+        def _field_label(text):
+            lab = QLabel(text)
             lab.setObjectName("UserStatus")
-            lay.addWidget(lab)
-            lay.addWidget(widget)
-            return lay
+            lab.setWordWrap(True)
+            return lab
 
         self.name_edit = QLineEdit(self._user["username"])
         self.name_edit.setMaxLength(24)
         self.name_edit.textChanged.connect(self._preview_name)
-        root.addLayout(_form("Имя пользователя (username)", self.name_edit))
+        self.name_edit.setMinimumHeight(36)
 
         self.contact_edit = QLineEdit(self._user.get("contact", ""))
         self.contact_edit.setPlaceholderText("e-mail или телефон (необязательно)")
-        root.addLayout(_form("Контакт", self.contact_edit))
+        self.contact_edit.setMinimumHeight(36)
 
-        # Тема и акцент
-        theme_row = QHBoxLayout()
-        theme_lab = QLabel("Тема")
-        theme_lab.setObjectName("UserStatus")
-        theme_row.addWidget(theme_lab, 1)
         self.theme_combo = QComboBox()
         self.theme_combo.addItem("Тёмная", "dark")
         self.theme_combo.addItem("Светлая", "light")
         idx = self.theme_combo.findData(self._user.get("theme", "dark"))
         self.theme_combo.setCurrentIndex(max(0, idx))
         self.theme_combo.currentIndexChanged.connect(self._preview_theme)
-        theme_row.addWidget(self.theme_combo)
-        root.addLayout(theme_row)
 
-        accent_row = QHBoxLayout()
-        accent_lab = QLabel("Акцентный цвет")
-        accent_lab.setObjectName("UserStatus")
-        accent_row.addWidget(accent_lab, 1)
         self.color_swatch = QPushButton()
-        self.color_swatch.setFixedSize(120, 36)
+        self.color_swatch.setFixedSize(130, 36)
         self.color_swatch.clicked.connect(self._pick_color)
-        accent_row.addWidget(self.color_swatch)
-        root.addLayout(accent_row)
         self._refresh_swatch()
 
-        # Пароль
         self.pwd_edit = QLineEdit()
         self.pwd_edit.setEchoMode(QLineEdit.EchoMode.Password)
         self.pwd_edit.setPlaceholderText("Новый пароль (мин. 6 символов)")
+        self.pwd_edit.setMinimumHeight(36)
         self.pwd_confirm = QLineEdit()
         self.pwd_confirm.setEchoMode(QLineEdit.EchoMode.Password)
         self.pwd_confirm.setPlaceholderText("Повторите пароль")
-        root.addLayout(_form("Смена пароля", self.pwd_edit))
-        root.addWidget(self.pwd_confirm)
+        self.pwd_confirm.setMinimumHeight(36)
+
+        form.addRow(preview_row)
+        form.addRow(_field_label("Имя пользователя (username)"), self.name_edit)
+        form.addRow(_field_label("Контакт"), self.contact_edit)
+        form.addRow(_field_label("Тема"), self.theme_combo)
+        form.addRow(_field_label("Акцентный цвет"), self.color_swatch)
+        form.addRow(_field_label("Смена пароля"), self.pwd_edit)
+        form.addRow(_field_label("Повторите пароль"), self.pwd_confirm)
 
         sep = QFrame()
         sep.setFrameShape(QFrame.Shape.HLine)
         sep.setStyleSheet(f"color: {PALETTE['border']};")
-        root.addWidget(sep)
+        form.addRow(sep)
 
         self.clear_all_btn = QPushButton("Очистить всю историю сообщений")
         self.clear_all_btn.setObjectName("Danger")
         self.clear_all_btn.clicked.connect(self._clear_all)
-        root.addWidget(self.clear_all_btn)
+        clear_row = QHBoxLayout()
+        clear_row.addWidget(self.clear_all_btn, 1)
+        form.addRow(clear_row)
 
-        root.addStretch(1)
+        scroll.setWidget(body)
+        root.addWidget(scroll, 1)
+
         btns = QHBoxLayout()
         cancel = QPushButton("Отмена")
         cancel.clicked.connect(self.reject)
@@ -111,6 +118,7 @@ class SettingsDialog(QDialog):
         save.setObjectName("Accent")
         save.clicked.connect(self._save)
         btns.addWidget(cancel)
+        btns.addStretch(1)
         btns.addWidget(save)
         root.addLayout(btns)
 

@@ -1,4 +1,6 @@
 import colorsys
+import os
+import sys
 
 # Базовый (тёмный) акцент по умолчанию.
 DEFAULT_ACCENT = "#FF7A1A"
@@ -6,6 +8,20 @@ DEFAULT_ACCENT = "#FF7A1A"
 
 def is_hex_color(s) -> bool:
     return isinstance(s, str) and len(s) == 7 and s[0] == "#"
+
+
+def _app_icon_dir() -> str:
+    """Папка с иконками: там же, где main.py (или рядом с exe в frozen-режиме)."""
+    if getattr(sys, "frozen", False):
+        return os.path.dirname(sys.executable)
+    return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def app_icon_path(theme="dark") -> str:
+    """Иконка приложения: светлая тема — icon_black.ico, тёмная — icon_white.ico."""
+    name = "icon_black.ico" if theme == "light" else "icon_white.ico"
+    path = os.path.join(_app_icon_dir(), name)
+    return path if os.path.exists(path) else ""
 
 
 def _lighten(hex_color, factor):
