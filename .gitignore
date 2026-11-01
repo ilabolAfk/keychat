@@ -4,6 +4,7 @@ keychat.db
 *.db.key
 keychat_files/
 _sticker_cache/
+avatars/
 
 # Сборка
 build/

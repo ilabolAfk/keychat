@@ -1,4 +1,5 @@
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import QFrame, QVBoxLayout, QLabel
 from .theme import PALETTE
 
@@ -13,11 +14,15 @@ def text_color_for_hex(hex_color):
 
 
 class Avatar(QFrame):
-    """Круглый аватар с инициалами на оранжевой палитре."""
+    """Круглый аватар: показывает фото (PNG/JPG), иначе инициал на цветном фоне.
 
-    def __init__(self, name, color=None, size=44, parent=None):
+    Без рамки вокруг — только круг с изображением либо заливкой цветом.
+    """
+
+    def __init__(self, name, color=None, size=44, image_path=None, parent=None):
         super().__init__(parent)
-        self.setFixedSize(size, size)
+        self._image_path = image_path or ""
+        self._size = size
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
         self.label = QLabel()
@@ -25,33 +30,60 @@ class Avatar(QFrame):
         lay.addWidget(self.label)
         self._name = name
         self._color = color or PALETTE["orange"]
-        self.set_size(size)
         self.set_name(name)
 
     def set_name(self, name):
         self._name = name
-        self.label.setText(name.strip()[:1].upper() if name.strip() else "?")
-
-    def set_size(self, size):
-        self.setFixedSize(size, size)
-        font_size = max(12, int(size * 0.42))
-        self.label.setStyleSheet(
-            f"font-size: {font_size}px; font-weight: 700; background: transparent;"
-        )
-        self._apply()
+        if not self._image_path:
+            self.label.setText(name.strip()[:1].upper() if name.strip() else "?")
+        else:
+            self.label.setText("")
 
     def set_color(self, color):
         self._color = color
         self._apply()
 
+    def set_image(self, image_path):
+        """Устанавливает фото аватара (путь или пустая строка — вернуть инициал)."""
+        self._image_path = image_path or ""
+        if self._image_path:
+            self.label.setText("")
+        self._apply()
+
+    def image_path(self):
+        return self._image_path
+
+    def set_size(self, size):
+        self._size = size
+        self.setFixedSize(size, size)
+        self._apply()
+
     def _apply(self):
-        self.setStyleSheet(
-            f"border-radius: {self.width() // 2}px;"
-            f"border: 2px solid {PALETTE['orange_light']};"
-            f"background-color: {self._color};"
-        )
+        size = self._size
+        radius = size // 2
+        self.setFixedSize(size, size)
+        if self._image_path:
+            pm = QPixmap(self._image_path)
+            if not pm.isNull():
+                pm = pm.scaled(
+                    size, size,
+                    Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                    Qt.TransformationMode.SmoothTransformation,
+                )
+                # кроп до квадрата по центру
+                pm = pm.copy((pm.width() - size) // 2, (pm.height() - size) // 2, size, size)
+                self.label.setPixmap(pm)
+                self.setStyleSheet(
+                    f"border-radius: {radius}px; background: transparent;"
+                )
+                return
+        # без фото — цветной круг с инициалом
+        self.label.setText(self._name.strip()[:1].upper() if self._name.strip() else "?")
         self.label.setStyleSheet(
-            f"font-size: {max(12, int(self.width() * 0.42))}px;"
+            f"font-size: {max(12, int(size * 0.42))}px;"
             f"font-weight: 700; color: {text_color_for_hex(self._color)};"
             "background: transparent;"
+        )
+        self.setStyleSheet(
+            f"border-radius: {radius}px; background-color: {self._color};"
         )

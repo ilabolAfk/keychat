@@ -50,6 +50,7 @@ class Database:
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 username TEXT NOT NULL UNIQUE,
                 avatar_color TEXT NOT NULL DEFAULT '#FF7A1A',
+                avatar_path TEXT,
                 theme TEXT NOT NULL DEFAULT 'dark',
                 password_hash TEXT,
                 created_at TEXT NOT NULL DEFAULT (datetime('now'))
@@ -85,7 +86,7 @@ class Database:
         """Добавляет колонки msg_type/meta/password_hash/theme в старые базы."""
         for tbl, cols_def in (
             ("messages", [("msg_type", "TEXT NOT NULL DEFAULT 'text'"), ("meta", "TEXT")]),
-            ("users", [("password_hash", "TEXT"), ("theme", "TEXT NOT NULL DEFAULT 'dark'")]),
+            ("users", [("password_hash", "TEXT"), ("theme", "TEXT NOT NULL DEFAULT 'dark'"), ("avatar_path", "TEXT")]),
         ):
             cols = {r[1] for r in self.conn.execute(f"PRAGMA table_info({tbl})")}
             for name, ddl in cols_def:
@@ -122,6 +123,7 @@ class Database:
             "id": user["id"],
             "username": user["username"],
             "avatar_color": user["avatar_color"],
+            "avatar_path": user.get("avatar_path") or "",
             "theme": user.get("theme", "dark"),
         }
 
@@ -154,6 +156,12 @@ class Database:
     def update_avatar_color(self, user_id, color):
         self.conn.execute(
             "UPDATE users SET avatar_color = ? WHERE id = ?", (color, user_id)
+        )
+        self.conn.commit()
+
+    def update_avatar_path(self, user_id, avatar_path):
+        self.conn.execute(
+            "UPDATE users SET avatar_path = ? WHERE id = ?", (avatar_path, user_id)
         )
         self.conn.commit()
 
@@ -209,6 +217,24 @@ class Database:
             m["text"] = self.crypto.decrypt_text(m["text"])
         return m
 
+    def delete_message(self, message_id, chat_id):
+        """Удаляет одно сообщение и пересобирает превью чата."""
+        self.conn.execute("DELETE FROM messages WHERE id = ?", (message_id,))
+        last = self.conn.execute(
+            "SELECT text, msg_type, meta FROM messages "
+            "WHERE chat_id = ? ORDER BY id DESC LIMIT 1", (chat_id,),
+        ).fetchone()
+        if last:
+            display = _preview_text(last["text"], last["msg_type"], last["meta"])
+            self.conn.execute(
+                "UPDATE chats SET last_message = ? WHERE id = ?", (display, chat_id)
+            )
+        else:
+            self.conn.execute(
+                "UPDATE chats SET last_message = NULL WHERE id = ?", (chat_id,)
+            )
+        self.conn.commit()
+
     def clear_history(self, chat_id):
         self.conn.execute("DELETE FROM messages WHERE chat_id = ?", (chat_id,))
         self.conn.execute(
@@ -236,7 +262,7 @@ class Database:
         rows = self.conn.execute(
             """
             SELECT c.id, c.last_message, c.last_seen,
-                   u.id AS peer_id, u.username, u.avatar_color
+                   u.id AS peer_id, u.username, u.avatar_color, u.avatar_path
             FROM chats c
             JOIN users u ON u.id = c.peer_id
             ORDER BY COALESCE(c.last_seen, '') DESC, c.id DESC

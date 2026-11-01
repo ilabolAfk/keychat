@@ -1,9 +1,12 @@
+import os
+import shutil
+
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton,
     QColorDialog, QMessageBox, QFrame, QComboBox, QFormLayout, QScrollArea,
-    QWidget,
+    QWidget, QFileDialog,
 )
 from .theme import PALETTE, DEFAULT_ACCENT, current_qss
 from .widgets import Avatar, text_color_for_hex
@@ -46,11 +49,29 @@ class SettingsDialog(QDialog):
         form.setSpacing(10)
         form.setLabelAlignment(Qt.AlignmentFlag.AlignLeft)
 
-        self.preview = Avatar(self._user["username"], self._user["avatar_color"], size=84)
+        self.preview = Avatar(
+            self._user["username"], self._user["avatar_color"],
+            size=84, image_path=self._user.get("avatar_path") or "",
+        )
         preview_row = QHBoxLayout()
         preview_row.addStretch(1)
         preview_row.addWidget(self.preview)
         preview_row.addStretch(1)
+
+        self.avatar_btn = QPushButton("Выбрать фото…")
+        self.avatar_btn.setObjectName("Ghost")
+        self.avatar_btn.clicked.connect(self._pick_avatar)
+        self.clear_avatar_btn = QPushButton("Сбросить")
+        self.clear_avatar_btn.setObjectName("Ghost")
+        self.clear_avatar_btn.clicked.connect(self._clear_avatar)
+        avatar_btns = QHBoxLayout()
+        avatar_btns.addStretch(1)
+        avatar_btns.addWidget(self.avatar_btn)
+        avatar_btns.addWidget(self.clear_avatar_btn)
+        avatar_btns.addStretch(1)
+        preview_col = QVBoxLayout()
+        preview_col.addLayout(preview_row)
+        preview_col.addLayout(avatar_btns)
 
         def _field_label(text):
             lab = QLabel(text)
@@ -88,7 +109,7 @@ class SettingsDialog(QDialog):
         self.pwd_confirm.setPlaceholderText("Повторите пароль")
         self.pwd_confirm.setMinimumHeight(36)
 
-        form.addRow(preview_row)
+        form.addRow(preview_col)
         form.addRow(_field_label("Имя пользователя (username)"), self.name_edit)
         form.addRow(_field_label("Контакт"), self.contact_edit)
         form.addRow(_field_label("Тема"), self.theme_combo)
@@ -159,6 +180,29 @@ class SettingsDialog(QDialog):
             self._refresh_swatch()
             self._preview_theme()
 
+    def _pick_avatar(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Выбрать фото аватара", "", "Изображения (*.png *.jpg *.jpeg *.webp)"
+        )
+        if not path:
+            return
+        dest = self._copy_avatar_to_store(path)
+        self._user["avatar_path"] = dest
+        self.preview.set_image(dest)
+
+    def _clear_avatar(self):
+        self._user["avatar_path"] = ""
+        self.preview.set_image("")
+
+    def _copy_avatar_to_store(self, src):
+        """Копирует фото в хранилище аватаров рядом с БД (без хардкода пути)."""
+        store = os.path.join(os.path.dirname(self.db.path), "avatars")
+        os.makedirs(store, exist_ok=True)
+        ext = os.path.splitext(src)[1].lower() or ".png"
+        dest = os.path.join(store, f"avatar_{self._user['id']}{ext}")
+        shutil.copyfile(src, dest)
+        return dest
+
     def _clear_all(self):
         ret = QMessageBox.question(
             self, "Сброс истории",
@@ -194,6 +238,7 @@ class SettingsDialog(QDialog):
         self._user["theme"] = self.theme_combo.currentData()
         self.db.update_username(self._user["id"], name)
         self.db.update_avatar_color(self._user["id"], self._user["avatar_color"])
+        self.db.update_avatar_path(self._user["id"], self._user.get("avatar_path") or "")
         self.db.update_theme(self._user["id"], self._user["theme"])
         if self._user.get("contact"):
             self.db.set_setting(f"contact:{self._user['id']}", self._user["contact"])

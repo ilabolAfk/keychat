@@ -16,6 +16,7 @@ from .security import files_dir_for, random_stored_name
 from .stickers import StickerPicker, find_stickers
 from .calls import CallDialog
 from .voice import VoiceRecorder, VoicePlayer, wav_duration_ms
+from .notify import NotificationPlayer
 
 import qtawesome as qta
 
@@ -57,7 +58,10 @@ class ChatRow(QWidget):
         lay = QHBoxLayout(self)
         lay.setContentsMargins(10, 8, 10, 8)
         lay.setSpacing(12)
-        self.avatar = Avatar(chat["username"], chat["avatar_color"], size=44)
+        self.avatar = Avatar(
+            chat["username"], chat["avatar_color"],
+            size=44, image_path=chat.get("avatar_path") or "",
+        )
         lay.addWidget(self.avatar)
 
         mid = QVBoxLayout()
@@ -97,12 +101,14 @@ class MessageBubble(QFrame):
 
     file_download_requested = Signal(str, str)  # (stored_name, filename)
     voice_play_requested = Signal(str)  # wav_hex
+    delete_requested = Signal(int)  # message_id
 
-    def __init__(self, msg, mine, avatar_color):
+    def __init__(self, msg, mine, avatar_color, avatar_path=""):
         super().__init__()
         self.stored_name = msg.get("meta") or ""
         self.file_name = "файл"
         self._downloadable = False
+        self.msg_id = msg.get("id")
         bubble_bg = PALETTE["bubble_me"] if mine else PALETTE["bubble_peer"]
         align = Qt.AlignmentFlag.AlignRight if mine else Qt.AlignmentFlag.AlignLeft
 
@@ -110,7 +116,7 @@ class MessageBubble(QFrame):
         outer.setContentsMargins(4, 2, 4, 2)
         outer.setSpacing(8)
         if not mine:
-            av = Avatar("", color=avatar_color, size=30)
+            av = Avatar("", color=avatar_color, size=30, image_path=avatar_path)
             outer.addWidget(av, alignment=Qt.AlignmentFlag.AlignBottom)
 
         inner = QVBoxLayout()
@@ -236,6 +242,15 @@ class MessageBubble(QFrame):
             return
         super().mouseReleaseEvent(event)
 
+    def contextMenuEvent(self, event):
+        if self.msg_id is None:
+            return
+        from PySide6.QtWidgets import QMenu
+        menu = QMenu(self)
+        act = menu.addAction("Удалить сообщение")
+        if menu.exec(event.globalPos()):
+            self.delete_requested.emit(self.msg_id)
+
 
 class MainWindow(QWidget):
     logout_requested = Signal()
@@ -247,6 +262,7 @@ class MainWindow(QWidget):
         self.user = user
         self.active_chat = None
         self.history = []
+        self.notifier = NotificationPlayer(self)
         self.setWindowTitle("KeyChat")
         self.setMinimumSize(820, 560)
         self.resize(1024, 680)
@@ -286,7 +302,10 @@ class MainWindow(QWidget):
         pl = QHBoxLayout(self.profile)
         pl.setContentsMargins(4, 4, 4, 4)
         pl.setSpacing(12)
-        self.profile_avatar = Avatar(self.user["username"], self.user["avatar_color"], size=48)
+        self.profile_avatar = Avatar(
+            self.user["username"], self.user["avatar_color"],
+            size=48, image_path=self.user.get("avatar_path") or "",
+        )
         pl.addWidget(self.profile_avatar)
         pinfo = QVBoxLayout()
         pinfo.setSpacing(2)
@@ -346,7 +365,7 @@ class MainWindow(QWidget):
         hl = QHBoxLayout(self.header)
         hl.setContentsMargins(20, 10, 20, 10)
         hl.setSpacing(12)
-        self.header_avatar = Avatar("", PALETTE["orange"], size=44)
+        self.header_avatar = Avatar("", PALETTE["orange"], size=44, image_path="")
         hl.addWidget(self.header_avatar)
         self.header_peer = QLabel("Выберите чат")
         self.header_peer.setObjectName("HeaderPeer")
@@ -514,6 +533,7 @@ class MainWindow(QWidget):
         self.header_peer.setText(chat["username"])
         self.header_avatar.set_name(chat["username"])
         self.header_avatar.set_color(chat["avatar_color"])
+        self.header_avatar.set_image(chat.get("avatar_path") or "")
         self.header_avatar.set_size(44)
         self.empty_state.setVisible(False)
         self.history_area.setVisible(True)
@@ -528,6 +548,16 @@ class MainWindow(QWidget):
         chat_id = self.active_chat["id"]
         rows = self.db.get_history(chat_id)
         my_color = self.user["avatar_color"]
+
+        # Звук при получении новых сообщений от собеседника (не при первом показе)
+        if getattr(self, "_seen_max", None) is not None:
+            peer_ids = [r["id"] for r in rows if r["sender_id"] != self.user["id"]]
+            if peer_ids and max(peer_ids) > self._seen_max:
+                self.notifier.play_received()
+        max_ids = [r["id"] for r in rows if r["sender_id"] != self.user["id"]]
+        if max_ids:
+            self._seen_max = max(max_ids)
+
         while self.history_container.count() > 1:
             it = self.history_container.takeAt(0)
             w = it.widget()
@@ -536,9 +566,11 @@ class MainWindow(QWidget):
         for row in rows:
             mine = row["sender_id"] == self.user["id"]
             peer_color = self.active_chat["avatar_color"]
-            bubble = MessageBubble(row, mine, my_color if mine else peer_color)
+            avatar_path = self.user.get("avatar_path", "") if mine else self.active_chat.get("avatar_path", "")
+            bubble = MessageBubble(row, mine, my_color if mine else peer_color, avatar_path)
             bubble.file_download_requested.connect(self._download_file)
             bubble.voice_play_requested.connect(self._play_voice)
+            bubble.delete_requested.connect(self._delete_message)
             self.history_container.insertWidget(
                 self.history_container.count() - 1, bubble
             )
@@ -554,7 +586,7 @@ class MainWindow(QWidget):
         )
         msg["sender_name"] = self.user["username"]
         peer_color = self.active_chat["avatar_color"]
-        bubble = MessageBubble(msg, True, peer_color)
+        bubble = MessageBubble(msg, True, peer_color, self.user.get("avatar_path", ""))
         self.history_container.insertWidget(self.history_container.count() - 1, bubble)
         self._scroll_to_bottom()
         self._load_chats()
@@ -573,7 +605,7 @@ class MainWindow(QWidget):
             msg_type="sticker", meta=path,
         )
         msg["sender_name"] = self.user["username"]
-        bubble = MessageBubble(msg, True, self.active_chat["avatar_color"])
+        bubble = MessageBubble(msg, True, self.active_chat["avatar_color"], self.user.get("avatar_path", ""))
         self.history_container.insertWidget(self.history_container.count() - 1, bubble)
         self._scroll_to_bottom()
         self._load_chats()
@@ -591,7 +623,7 @@ class MainWindow(QWidget):
             msg_type="file", meta=rel_path + "|name=" + name,
         )
         msg["sender_name"] = self.user["username"]
-        bubble = MessageBubble(msg, True, self.active_chat["avatar_color"])
+        bubble = MessageBubble(msg, True, self.active_chat["avatar_color"], self.user.get("avatar_path", ""))
         bubble.file_download_requested.connect(self._download_file)
         self.history_container.insertWidget(self.history_container.count() - 1, bubble)
         self._scroll_to_bottom()
@@ -607,6 +639,19 @@ class MainWindow(QWidget):
         with open(stored_path, "wb") as f:
             f.write(enc)
         return stored_name
+
+    def _delete_message(self, message_id):
+        if self.active_chat is None:
+            return
+        ret = QMessageBox.question(
+            self, "Удалить сообщение",
+            "Удалить это сообщение?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if ret == QMessageBox.StandardButton.Yes:
+            self.db.delete_message(message_id, self.active_chat["id"])
+            self._reload_history()
+            self._load_chats()
 
     def _download_file(self, stored_name, filename):
         """Скачивает зашифрованный файл в выбранную папку, расшифровывая его."""
@@ -661,7 +706,7 @@ class MainWindow(QWidget):
             msg_type="voice", meta=wav.hex(),
         )
         msg["sender_name"] = self.user["username"]
-        bubble = MessageBubble(msg, True, self.active_chat["avatar_color"])
+        bubble = MessageBubble(msg, True, self.active_chat["avatar_color"], self.user.get("avatar_path", ""))
         bubble.voice_play_requested.connect(self._play_voice)
         self.history_container.insertWidget(self.history_container.count() - 1, bubble)
         self._scroll_to_bottom()
@@ -735,6 +780,7 @@ class MainWindow(QWidget):
                 "peer_id": user["id"],
                 "username": user["username"],
                 "avatar_color": user["avatar_color"],
+                "avatar_path": user.get("avatar_path") or "",
                 "last_message": None,
                 "last_seen": None,
             }
@@ -752,6 +798,7 @@ class MainWindow(QWidget):
             self.name_label.setText(self.user["username"])
             self.profile_avatar.set_name(self.user["username"])
             self.profile_avatar.set_color(self.user["avatar_color"])
+            self.profile_avatar.set_image(self.user.get("avatar_path") or "")
             self.apply_user_theme()
             self._load_chats()
             if self.active_chat:
